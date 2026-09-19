@@ -1,0 +1,15 @@
+{
+  "name": "forvia-core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "web-push": "^3.6.7"
+  }
+}
