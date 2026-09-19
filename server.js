@@ -610,6 +610,28 @@ function notifyNebula(event, payload) {
     body: JSON.stringify({ event, ...payload }),
   }).catch(e => console.error('notifyNebula failed:', event, e.message));
 }
+// PUT /api/data's one SYNCHRONOUS call to Nebula — anti-cheat, the import-level cap, and daily-
+// task grading used to run inline, right here, against the freshly-merged state, BEFORE it was
+// written: a flagged workout was pulled out of state.workouts before it ever touched disk or the
+// response (see this project's own writeup for why that ordering is load-bearing, not
+// incidental). Everything else this service tells Nebula about is fire-and-forget; this one call
+// isn't, because the whole point of anti-cheat is that a flagged workout is never actually stored
+// or shown — doing that scan after the write would let every flagged workout through once before
+// ever catching it. If Nebula is unreachable, this just skips scanning for the cycle (the raw
+// merged state is written as-is) rather than blocking a device from saving its workouts.
+async function scanViaNebula(uid, state, importedNewWorkouts) {
+  try {
+    const r = await fetch(`${NEBULA_URL}/internal/scan-data`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET },
+      body: JSON.stringify({ uid, state, importedNewWorkouts }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!r.ok) return state;
+    const data = await r.json();
+    return data.state || state;
+  } catch (e) { console.error('scanViaNebula failed:', uid, e.message); return state; }
+}
 // Requests FROM Nebula land on the `/internal/*` routes at the bottom of this file — this checks
 // the same shared secret on the way in.
 function requireInternal(req, res) {
@@ -645,20 +667,16 @@ const routes = {
     delete body.state.active;              // in-progress workouts stay device-local
     const importedNewWorkouts = mergeWorkoutsInto(user.id, body.state);
     mergeFoodDiaryInto(user.id, body.state);
-    writeState(user.id, body.state);
-    // Anti-cheat, the fixed-XP-budget import cap, and daily-task grading all used to run
-    // inline, right here, against this same freshly-merged state — they're Nebula's now (they
-    // all key off xpFor/rankFor). Best-effort and fire-and-forget on purpose: a device syncing
-    // its workouts must never wait on (or fail because of) the other service being slow or down.
-    notifyNebula('data-synced', { uid: user.id, importedNewWorkouts });
+    const state = await scanViaNebula(user.id, body.state, importedNewWorkouts);
+    writeState(user.id, state);
     // workouts/deletedWorkoutIds and foodDiary/deletedFoodEntryIds go back in the response too —
     // the merges above can add something this exact push didn't know about (logged from another
     // device meanwhile), and without handing that back, this device wouldn't see it until its
     // next full reload.
     json(res, 200, {
-      ok: true, ts: body.state._ts || null,
-      workouts: body.state.workouts, deletedWorkoutIds: body.state.deletedWorkoutIds,
-      foodDiary: body.state.foodDiary, deletedFoodEntryIds: body.state.deletedFoodEntryIds,
+      ok: true, ts: state._ts || null,
+      workouts: state.workouts, deletedWorkoutIds: state.deletedWorkoutIds,
+      foodDiary: state.foodDiary, deletedFoodEntryIds: state.deletedFoodEntryIds,
     });
   },
 
@@ -1628,12 +1646,22 @@ const internalRoutes = {
     json(res, 200, { ok: true });
   },
   // A user's synced state — Nebula reads this for XP/streak calc, anti-cheat, the import-level
-  // cap, task grading, and the social feed's workout cards. Read-only: Nebula never writes here,
-  // this service is the only owner of user_state.
+  // cap, task grading, and the social feed's workout cards.
   'GET /internal/state': async (req, res) => {
     if (!requireInternal(req, res)) return;
     const uid = new URL(req.url, 'http://x').searchParams.get('uid') || '';
     json(res, 200, { state: readState(uid) || null });
+  },
+  // The one write Nebula makes here: putting an overturned anti-cheat penalty's workout back
+  // into state.workouts (POST /api/admin/anticheat/review, on Nebula's side — scanForCheating
+  // pulled it out of here in the first place, during the /internal/scan-data call below). Every
+  // other write to user_state still only ever happens from this service's own PUT /api/data.
+  'PUT /internal/state': async (req, res) => {
+    if (!requireInternal(req, res)) return;
+    const body = await readBody(req);
+    if (!body.uid || !body.state || typeof body.state !== 'object') return json(res, 400, { error: 'uid and state required' });
+    writeState(body.uid, body.state);
+    json(res, 200, { ok: true });
   },
   // Bulk version of the above — Nebula's own stateCache mirror uses this once at boot (same
   // shape/reasoning as this service's own loadAllStates(), just fetched over HTTP instead of
