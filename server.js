@@ -1620,6 +1620,16 @@ const internalRoutes = {
     const uid = new URL(req.url, 'http://x').searchParams.get('uid') || '';
     json(res, 200, { state: readState(uid) || null });
   },
+  // Bulk version of the above — Nebula's own stateCache mirror uses this once at boot (same
+  // shape/reasoning as this service's own loadAllStates(), just fetched over HTTP instead of
+  // straight from Postgres) and keeps it fresh from there on via the data-synced event this
+  // service fires from PUT /api/data, not by polling this route again.
+  'GET /internal/states': async (req, res) => {
+    if (!requireInternal(req, res)) return;
+    const states = {};
+    for (const [uid, state] of stateCache) states[uid] = state;
+    json(res, 200, { states });
+  },
 };
 
 /* ---------- boot ---------- */
