@@ -114,6 +114,11 @@ const publicUser = user => ({
   // profile display concerns, so Nebula's own GET /api/me is the one place they're shown,
   // keeping "which of the two calls owns this field" unambiguous for whoever merges them.
 });
+// GET /api/uploads' own visibility rule (owner, or a currently-public account) needs `public`
+// even though publicUser() above deliberately never exposes it — the raw field still lives right
+// here on this service's own `users` row (Nebula patches it via POST /internal/user), just never
+// serialized out to a browser directly.
+const isPublic = uid => { const u = db.users.find(x => x.id === uid); return !!u && !!u.public && !u.disabled; };
 // Fire-and-forget, same as the old atomicWrite(dbFile,...) call it replaces: every one of the
 // call sites below just does `saveDb();` with no await and no return value, so this stays
 // safe to call bare — a failed write is logged, never thrown, never blocks the response.
