@@ -105,11 +105,14 @@ const publicUser = user => ({
   // compound given name like "Jose Maria" doesn't have a real first/last boundary a splitter
   // can find, so re-deriving it every time undid any correction the person had made).
   firstName: user.firstName ?? null, lastName: user.lastName ?? null,
-  username: user.username || null,
-  public: !!user.public, bio: user.bio || '', avatarUrl: avatarUrlOf(user),
-  pinnedWorkoutIds: user.pinnedWorkoutIds || [], pinnedPR: user.pinnedPR || null,
+  username: user.username || null, avatarUrl: avatarUrlOf(user),
   email: user.email || null, emailVerified: !!user.emailVerified, phone: user.phone || null,
   created: user.created || null,
+  // public/bio/pinnedWorkoutIds/pinnedPR still live on this same `users` row (Nebula patches
+  // them via POST /internal/user — see NOTICE.md/the split's own writeup for why the row wasn't
+  // fully split too) but are deliberately left OUT of this identity response: they're social/
+  // profile display concerns, so Nebula's own GET /api/me is the one place they're shown,
+  // keeping "which of the two calls owns this field" unambiguous for whoever merges them.
 });
 // Fire-and-forget, same as the old atomicWrite(dbFile,...) call it replaces: every one of the
 // call sites below just does `saveDb();` with no await and no return value, so this stays
@@ -680,6 +683,8 @@ const routes = {
   // (see the "no upgrade yet" note on the admin write routes below) — cosmetic only for now.
 
 
+  // Preflight for the one browser-originated cross-origin POST this API answers.
+  'OPTIONS /api/alpha/apply': async (req, res) => { res.writeHead(204, corsHeaders(req)); res.end(); },
   'POST /api/alpha/apply': async (req, res) => {
     const headers = corsHeaders(req);
     const body = await readBody(req);
@@ -1563,6 +1568,16 @@ const internalRoutes = {
   // Body: { cookie } — the raw Cookie header value from the original browser request (Nebula
   // forwards it as-is, it never tries to parse gymsid itself). Returns the user's public shape
   // (same as GET /api/me) so Nebula never needs a second round trip just to get a name/avatar.
+  // A web push this service is the only one that can actually send (it owns the VAPID keys and
+  // db.subs) — on behalf of a Nebula feature (an anti-cheat ruling, a waitlist spot opening up).
+  // Fire-and-forget on Nebula's side, same as notifyNebula() is on this one; sendPush itself
+  // already no-ops safely if the user has no push subscription at all.
+  'POST /internal/push': async (req, res) => {
+    if (!requireInternal(req, res)) return;
+    const body = await readBody(req);
+    if (body.uid && body.payload) sendPush(body.uid, body.payload);
+    json(res, 200, { ok: true });
+  },
   'POST /internal/session': async (req, res) => {
     if (!requireInternal(req, res)) return;
     const body = await readBody(req);
