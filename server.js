@@ -40,6 +40,12 @@ const ALLOW_REGISTER = !/^(0|false|no|off)$/i.test(process.env.ALLOW_REGISTER ||
 // onboarding screen before anyone is signed in, so it has to be answerable without a session,
 // which is why it's duplicated here rather than composed from the other service.
 const BOX_LOCATION_MODE = /^(off|precise)$/i.test(process.env.BOX_LOCATION_MODE || '') ? process.env.BOX_LOCATION_MODE.toLowerCase() : 'search';
+// Empty by default — a self-hosted instance gets zero analytics unless its own operator sets
+// this. The frontend only ever injects Google's gtag.js when this is non-empty AND someone is
+// actually signed in (see lib/analytics.js): accepting the Terms/Privacy/Cookies pages at
+// account creation is what this project treats as consent for it, so it's never loaded on the
+// signed-out login screen or for a guest session.
+const GOOGLE_ANALYTICS_ID = process.env.GOOGLE_ANALYTICS_ID || '';
 // 90 days keeps someone who trains a few times a week permanently signed in without a stolen
 // cookie staying good for a year. Overridable because a family instance and one on the open
 // internet don't want the same number. Only affects cookies minted from now on — the expiry is
@@ -690,7 +696,7 @@ const routes = {
   // Public config the login screen needs before anyone is signed in.
 
 
-  'GET /api/config': async (req, res) => json(res, 200, { invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST, allow_register: ALLOW_REGISTER, box_location_mode: BOX_LOCATION_MODE }),
+  'GET /api/config': async (req, res) => json(res, 200, { invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST, allow_register: ALLOW_REGISTER, box_location_mode: BOX_LOCATION_MODE, google_analytics_id: GOOGLE_ANALYTICS_ID || null }),
 
   // Public, no auth: admin-authored exercise renames (see the "exercise name overrides"
   // section below for how they're written). The catalogue itself lives only in the frontend
