@@ -1220,11 +1220,14 @@ div{max-width:360px}h1{font-size:20px;margin:0 0 8px}p{color:#9db8a8;line-height
   },
 
   // Drill-down: full workout history + body-weight log for one user.
-  // Everything about one account, for the admin drill-down — publicUser() already carries
-  // name/email/phone/bio/avatarUrl/rank/perks/badges, so this only adds the fields that are
-  // admin-only (created, disabled, invitedBy, the raw XP adjustment) plus their training data.
-
-
+  // Everything about one account, for the admin drill-down — publicUser() only carries the
+  // identity fields this service still owns (see its own comment: rank/perks/badges/streakBonus
+  // moved to Nebula in the split, GET /api/admin/user/nebula there is the other half of this same
+  // drill-down, merged client-side same as GET /api/me already is). `pro` is re-added explicitly
+  // here even though publicUser() dropped it, same as /api/admin/users' list already does — it's
+  // still a plain field on this service's own `users` row (Nebula patches it via
+  // POST /internal/user), so there's no reason to make the admin panel wait on the other service
+  // just to show it.
   'GET /api/admin/user': async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const id = new URL(req.url, 'http://x').searchParams.get('id');
@@ -1235,7 +1238,7 @@ div{max-width:360px}h1{font-size:20px;margin:0 0 8px}p{color:#9db8a8;line-height
       user: {
         ...publicUser(u),
         created: u.created || null, disabled: !!u.disabled, invitedBy: u.invitedBy || null,
-        adminXpAdjust: u.adminXpAdjust || 0,
+        adminXpAdjust: u.adminXpAdjust || 0, pro: !!u.pro,
       },
       unit: S.unit || 'kg',
       lastSync: S._ts || null,
