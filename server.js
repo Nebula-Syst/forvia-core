@@ -1745,6 +1745,23 @@ const internalRoutes = {
     saveDb();
     json(res, 200, { ok: true });
   },
+  // TEMPORARY — one-off cleanup for a handful of throwaway test accounts created while
+  // verifying the new admin user page, never meant to stay a real feature (the product only
+  // ever wanted soft-delete, see POST /api/admin/user/delete). A raw SQL DELETE on kv_users
+  // would've been unsafe: this service dumps its whole in-memory `db.users` back to the table
+  // on every save, so any unrelated save (anyone else logging in) could've silently resurrected
+  // the row. This mutates the actual in-memory array that saveDb() persists, so it sticks. Only
+  // ever call it for test rows that were never real users — remove this handler again right
+  // after.
+  'POST /internal/purge-users': async (req, res) => {
+    if (!requireInternal(req, res)) return;
+    const body = await readBody(req);
+    const ids = Array.isArray(body.ids) ? body.ids : [];
+    const before = db.users.length;
+    db.users = db.users.filter(u => !ids.includes(u.id));
+    saveDb();
+    json(res, 200, { ok: true, removed: before - db.users.length });
+  },
   // A user's synced state — Nebula reads this for XP/streak calc, anti-cheat, the import-level
   // cap, task grading, and the social feed's workout cards.
   'GET /internal/state': async (req, res) => {
