@@ -363,6 +363,7 @@ function readSession(req) {
   const user = db.users.find(u => u.id === parsed.uid) || null;
   if (!user) return null;
   if (user.disabled) return null;           // disabled accounts are locked out everywhere
+  if (user.deleted) return null;            // soft-deleted — same lockout, see admin/user/delete
   if (!(user.sessions || []).find(s => s.id === parsed.sid)) return null;
   return user;
 }
@@ -801,6 +802,7 @@ const routes = {
     const fail = msg => { audit(req, 'auth.login.fail', { ok: false, uid: user?.id, msg }); return json(res, 401, { error: 'incorrect email or password' }) }
     if (!user || !verifyPassword(String(body.password || ''), user.pwd.salt, user.pwd.hash)) return fail(user ? 'bad-password' : 'unknown-email');
     if (user.disabled) { audit(req, 'auth.login.fail', { ok: false, user, msg: 'account-disabled' }); return json(res, 403, { error: 'this account has been disabled' }) }
+    if (user.deleted) { audit(req, 'auth.login.fail', { ok: false, user, msg: 'account-deleted' }); return json(res, 403, { error: 'this account has been deleted' }) }
     audit(req, 'auth.login.ok', { user });
     json(res, 200, { user: publicUser(user) }, { 'Set-Cookie': sessionCookie(user, req) });
   },
@@ -1207,7 +1209,7 @@ div{max-width:360px}h1{font-size:20px;margin:0 0 8px}p{color:#9db8a8;line-height
       const last = workouts[workouts.length - 1];
       return {
         id: u.id, name: u.name, email: u.email || null, created: u.created || null,
-        disabled: !!u.disabled, admin: isAdmin(u), employeeTypes: employeeTypesOf(u), invitedBy: u.invitedBy || null,
+        disabled: !!u.disabled, deleted: !!u.deleted, admin: isAdmin(u), employeeTypes: employeeTypesOf(u), invitedBy: u.invitedBy || null,
         pro: !!u.pro,
         workouts: workouts.length,
         lastWorkout: last ? last.d : null,
@@ -1237,7 +1239,7 @@ div{max-width:360px}h1{font-size:20px;margin:0 0 8px}p{color:#9db8a8;line-height
     json(res, 200, {
       user: {
         ...publicUser(u),
-        created: u.created || null, disabled: !!u.disabled, invitedBy: u.invitedBy || null,
+        created: u.created || null, disabled: !!u.disabled, deleted: !!u.deleted, deletedAt: u.deletedAt || null, invitedBy: u.invitedBy || null,
         adminXpAdjust: u.adminXpAdjust || 0, pro: !!u.pro,
       },
       unit: S.unit || 'kg',
@@ -1265,6 +1267,90 @@ div{max-width:360px}h1{font-size:20px;margin:0 0 8px}p{color:#9db8a8;line-height
     saveDb();
     audit(req, u.disabled ? 'admin.user.disable' : 'admin.user.enable', { user: admin, target: u });
     json(res, 200, { ok: true, id: u.id, disabled: u.disabled });
+  },
+
+  // Soft-delete: locked out exactly like `disabled` (readSession/POST /api/login both check
+  // it), kept distinct from it so the admin panel can tell "suspended, meant to be temporary"
+  // apart from "deleted, pending a real purge" — no scheduled purge exists yet, this only ever
+  // flips the flag, so it's recoverable for as long as nothing else removes the row by hand.
+  'POST /api/admin/user/delete': async (req, res) => {
+    const admin = requireAdmin(req, res); if (!admin) return;
+    const body = await readBody(req);
+    const u = db.users.find(x => x.id === body.id);
+    if (!u) return json(res, 404, { error: 'no such user' });
+    if (isAdmin(u)) return json(res, 400, { error: 'cannot delete an admin' });
+    u.deleted = true;
+    u.deletedAt = new Date().toISOString();
+    presence.delete(u.id);
+    saveDb();
+    audit(req, 'admin.user.delete', { user: admin, target: u });
+    json(res, 200, { ok: true, id: u.id, deleted: true, deletedAt: u.deletedAt });
+  },
+
+  'POST /api/admin/user/restore': async (req, res) => {
+    const admin = requireAdmin(req, res); if (!admin) return;
+    const body = await readBody(req);
+    const u = db.users.find(x => x.id === body.id);
+    if (!u) return json(res, 404, { error: 'no such user' });
+    u.deleted = false;
+    delete u.deletedAt;
+    saveDb();
+    audit(req, 'admin.user.restore', { user: admin, target: u });
+    json(res, 200, { ok: true, id: u.id, deleted: false });
+  },
+
+  // Direct admin correction of the identity fields this service owns — same validation as the
+  // self-service versions above (POST /api/account/name|username|phone|email), minus the
+  // ownership check (the admin is editing someone ELSE's account) and, for email, minus the
+  // verification-email send (an admin fixing a typo isn't the account holder confirming
+  // receipt of it — email just goes in as given, unverified, same as any other email change).
+  // Only the fields actually sent are touched, so a partial edit never has to resend the rest.
+  'POST /api/admin/user/edit': async (req, res) => {
+    const admin = requireAdmin(req, res); if (!admin) return;
+    const body = await readBody(req);
+    const u = db.users.find(x => x.id === body.id);
+    if (!u) return json(res, 404, { error: 'no such user' });
+    const changed = [];
+    if (body.firstName != null || body.lastName != null) {
+      const firstName = String(body.firstName || '').trim().slice(0, 40);
+      const lastName = String(body.lastName || '').trim().slice(0, 40);
+      const name = `${firstName} ${lastName}`.trim().slice(0, 60);
+      if (!name) return json(res, 400, { error: 'name required' });
+      u.firstName = firstName; u.lastName = lastName; u.name = name;
+      changed.push('name');
+    }
+    if (body.username != null) {
+      const username = String(body.username).trim().toLowerCase();
+      if (!username) { delete u.username; changed.push('username'); }
+      else {
+        if (!/^[a-z0-9_]{3,20}$/.test(username)) return json(res, 400, { error: 'usernames are 3-20 characters: letters, numbers, underscore only' });
+        if (username !== u.username) {
+          const other = db.users.find(x => x.username === username);
+          if (other && other.id !== u.id) return json(res, 409, { error: 'that username is already taken' });
+        }
+        u.username = username; changed.push('username');
+      }
+    }
+    if (body.phone != null) {
+      const phone = String(body.phone).trim().slice(0, 24);
+      if (phone && !/^[+\d][\d\s()-]{3,23}$/.test(phone)) return json(res, 400, { error: 'that doesn\'t look like a phone number' });
+      u.phone = phone || null; changed.push('phone');
+    }
+    if (body.email != null) {
+      const email = String(body.email).trim().toLowerCase().slice(0, 254);
+      if (!email) return json(res, 400, { error: 'email required' });
+      if (!EMAIL_RE.test(email)) return json(res, 400, { error: 'enter a valid email address' });
+      if (email !== u.email) {
+        const other = findByEmail(email);
+        if (other && other.id !== u.id) return json(res, 409, { error: 'that email is already in use' });
+        u.email = email; u.emailVerified = false; delete u.emailVerifyToken;
+        changed.push('email');
+      }
+    }
+    if (!changed.length) return json(res, 400, { error: 'nothing to change' });
+    saveDb();
+    audit(req, 'admin.user.edit', { user: admin, target: u, msg: changed.join(',') });
+    json(res, 200, { user: { ...publicUser(u), adminXpAdjust: u.adminXpAdjust || 0 } });
   },
 
   // A user can hold several employee types at once (founder, admin) — this replaces the
