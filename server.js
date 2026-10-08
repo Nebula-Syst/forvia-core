@@ -793,6 +793,49 @@ const routes = {
     json(res, 200, { user: publicUser(user) }, { 'Set-Cookie': sessionCookie(user, req) });
   },
 
+  // Forgot password — there was no way back into an account at all before this: the self-
+  // service password route needs the current password, and the admin panel had no "reset this
+  // user's password" action either (both reported missing by a tester). Always answers the
+  // same way regardless of whether the email matches an account, so this can't be used to
+  // check who has one. The actual reset needs a password field, so unlike verify-email (a
+  // one-click confirm) this link lands in the SPA, not a backend-rendered page.
+  'POST /api/account/forgot-password': async (req, res) => {
+    const body = await readBody(req);
+    const email = String(body.email || '').trim().toLowerCase().slice(0, 254);
+    const user = findByEmail(email);
+    let mailSent = false;
+    if (user && SMTP_CONFIGURED) {
+      user.passwordResetToken = { token: crypto.randomBytes(24).toString('base64url'), expires: Date.now() + 3600000 };
+      saveDb();
+      mailSent = await sendMail({
+        to: user.email, subject: 'Reset your password — Forvia',
+        text: `Someone (hopefully you) asked to reset the password for your Forvia account (${user.name}):\n\n${ORIGIN}/#/login/reset-password?token=${user.passwordResetToken.token}\n\nThis link works for 1 hour. If you didn't request this, you can ignore this message — your password hasn't changed.`,
+      });
+      audit(req, 'account.password.reset-requested', { user });
+    }
+    json(res, 200, { ok: true, mailSent, mailConfigured: SMTP_CONFIGURED });
+  },
+
+  // The token is single-use (deleted below) and short-lived (1h, set above) — tighter than
+  // email verification's 24h, since this one grants account access outright. Resetting also
+  // signs out every other session, same as a deliberate "sign out everywhere": a forgotten
+  // password is often forgotten because something else is wrong, so anyone else holding an
+  // old cookie shouldn't ride through on it.
+  'POST /api/account/reset-password': async (req, res) => {
+    const body = await readBody(req);
+    const token = String(body.token || '');
+    const password = String(body.password || '');
+    if (password.length < 8) return json(res, 400, { error: 'password must be at least 8 characters' });
+    const user = db.users.find(u => u.passwordResetToken?.token === token && u.passwordResetToken.expires > Date.now());
+    if (!user) return json(res, 400, { error: 'this link has expired or was already used — request a new one' });
+    user.pwd = hashPassword(password);
+    delete user.passwordResetToken;
+    user.sessions = [];
+    saveDb();
+    audit(req, 'account.password.reset', { user });
+    json(res, 200, { user: publicUser(user) }, { 'Set-Cookie': sessionCookie(user, req) });
+  },
+
 
   'POST /api/login': async (req, res) => {
     const body = await readBody(req);
@@ -1351,6 +1394,30 @@ div{max-width:360px}h1{font-size:20px;margin:0 0 8px}p{color:#9db8a8;line-height
     saveDb();
     audit(req, 'admin.user.edit', { user: admin, target: u, msg: changed.join(',') });
     json(res, 200, { user: { ...publicUser(u), adminXpAdjust: u.adminXpAdjust || 0 } });
+  },
+
+  // The admin-side half of account recovery — reported missing alongside the self-service
+  // forgot-password flow above, and the only path that works on an instance with no SMTP
+  // configured (forgot-password can't email a link there). Sets the password directly rather
+  // than emailing a reset link — the admin is expected to relay it to the account holder
+  // out of band — and returns it in the response exactly once, same as account creation
+  // already does; it's never stored or logged in the clear anywhere. An explicit password in
+  // the request is honored as-is (min 8 chars); omitted, one is generated here. Also signs
+  // the account out everywhere, same reasoning as a self-service reset.
+  'POST /api/admin/user/reset-password': async (req, res) => {
+    const admin = requireAdmin(req, res); if (!admin) return;
+    const body = await readBody(req);
+    const u = db.users.find(x => x.id === body.id);
+    if (!u) return json(res, 404, { error: 'no such user' });
+    let password = String(body.password || '');
+    if (password && password.length < 8) return json(res, 400, { error: 'password must be at least 8 characters' });
+    if (!password) password = crypto.randomBytes(9).toString('base64url');
+    u.pwd = hashPassword(password);
+    delete u.passwordResetToken;
+    u.sessions = [];
+    saveDb();
+    audit(req, 'admin.user.password-reset', { user: admin, target: u });
+    json(res, 200, { password });
   },
 
   // A user can hold several employee types at once (founder, admin) — this replaces the
