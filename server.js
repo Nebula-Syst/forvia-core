@@ -676,12 +676,12 @@ async function scanViaNebula(uid, state, importedNewWorkouts) {
 // one. sourceRewardId is AdMob's reward_amount's sibling param, transaction_id — Nebula dedupes
 // on it, so a retried callback is harmless either way; this is belt-and-suspenders, not the only
 // thing preventing a double-grant.
-async function grantAdRewardViaNebula(uid, sourceRewardId) {
+async function grantAdRewardViaNebula(uid, sourceRewardId, rewardItem, rewardAmount) {
   try {
     const r = await fetch(`${NEBULA_URL}/internal/ad-grant`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET },
-      body: JSON.stringify({ uid, sourceRewardId }),
+      body: JSON.stringify({ uid, sourceRewardId, rewardItem, rewardAmount }),
       signal: AbortSignal.timeout(5000),
     });
     return r.ok;
@@ -790,7 +790,12 @@ const routes = {
     const uid = url.searchParams.get('custom_data') || '';
     const sourceRewardId = url.searchParams.get('transaction_id') || '';
     if (!uid || !sourceRewardId) return json(res, 400, { error: 'missing fields' });
-    const granted = await grantAdRewardViaNebula(uid, sourceRewardId);
+    // reward_item/reward_amount are AdMob's own per-ad-unit "reward this much every time" config
+    // (set in the AdMob console, not invented here), echoed back verbatim on every verified
+    // callback — this is Forvia Coin's source of truth for how many coins a video is worth.
+    const rewardItem = url.searchParams.get('reward_item') || '';
+    const rewardAmount = Number(url.searchParams.get('reward_amount')) || 0;
+    const granted = await grantAdRewardViaNebula(uid, sourceRewardId, rewardItem, rewardAmount);
     json(res, 200, { ok: granted });
   },
 
