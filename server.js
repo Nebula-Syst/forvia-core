@@ -134,8 +134,13 @@ const isPublic = uid => { const u = db.users.find(x => x.id === uid); return !!u
 // saveAll never runs concurrently with itself (see Forvia's own db.js comment on why: two
 // overlapping calls used to duplicate every row in production).
 let saveChain = Promise.resolve();
+// Returns the chained promise so a caller that genuinely needs the write to be durable before
+// it responds — POST /internal/user below is the one that does — can `await saveDb()`. Every
+// other call site in this file still just calls it bare, same fire-and-forget as always; a
+// returned promise nobody awaits behaves identically to no return value at all.
 function saveDb() {
   saveChain = saveChain.then(() => saveAll(db)).catch(e => console.error('saveDb failed:', e.message));
+  return saveChain;
 }
 
 // Per-user training state (routines, workouts, bodyweight, nutrition diary...) — same
@@ -1803,13 +1808,23 @@ const internalRoutes = {
   // service's data. No field whitelist enforced here: Nebula is a trusted internal caller (the
   // shared secret is the boundary), same trust level this whole app already gives any of its
   // own route handlers direct `db` access.
+  // Awaits the save (unlike every other saveDb() call site in this file) — real incident,
+  // 2026-10-13: a rapid run of admin level-adjustment clicks on a live account responded
+  // "ok" to each one the instant the in-memory patch landed, before any of them were actually
+  // committed to Postgres. The process restarted (this host runs tight on memory) before the
+  // queued writes flushed, silently losing the account's last several patches even though
+  // Nebula had already been told every one of them succeeded — the level then drifted back
+  // toward its real, undocked value over the next few days as if the admin adjustment had
+  // never happened. Awaiting here closes that window: a caller only ever hears "ok" once the
+  // patch is durably on disk, and a crash before that now surfaces as a failed/reset request
+  // (patchUser's own .catch logs it) instead of a silent, already-acknowledged loss.
   'POST /internal/user': async (req, res) => {
     if (!requireInternal(req, res)) return;
     const body = await readBody(req);
     const u = db.users.find(x => x.id === body.uid);
     if (!u) return json(res, 404, { error: 'not found' });
     Object.assign(u, body.patch || {});
-    saveDb();
+    await saveDb();
     json(res, 200, { ok: true });
   },
   // A user's synced state — Nebula reads this for XP/streak calc, anti-cheat, the import-level
