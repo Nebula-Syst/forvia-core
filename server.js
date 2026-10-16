@@ -52,6 +52,21 @@ const GOOGLE_ANALYTICS_ID = process.env.GOOGLE_ANALYTICS_ID || '';
 // surfaces the "Earn rewards" card, same as GA never loading gtag.js with no id configured.
 const ADMOB_APP_ID = process.env.ADMOB_APP_ID || '';
 const ADMOB_REWARDED_UNIT_ID = process.env.ADMOB_REWARDED_UNIT_ID || '';
+// Web-only half of the ads plan — AdSense banners on real browser traffic (lib/analytics.js's
+// own comment explains why the native-app WebView never gets this: Google's own policy forbids
+// AdSense inside a wrapped app). Same empty-by-default posture as every other third-party id
+// here. Two reusable ad units rather than one per placement — six separate ad units would mean
+// six separate things to create and maintain in AdSense's own dashboard for what's visually the
+// same two shapes: ADSENSE_SLOT_FEED is the "banner between list items" unit (Social → Discover,
+// always on, plus History/Library/Nutrition diary, each opt-in — see frontend's AdPlacements
+// settings and AdUnit.jsx), ADSENSE_SLOT_BANNER is the single standalone-spot unit (the rest
+// timer, the post-workout summary). AdSense itself is fine with the same unit id appearing
+// several places on a page/across a session; this isn't a technical shortcut, it's the
+// pragmatic default for an account that's just starting out. A placement with no slot id
+// configured (or opted out — see S.adPlacements) just doesn't render.
+const ADSENSE_CLIENT_ID = process.env.ADSENSE_CLIENT_ID || '';
+const ADSENSE_SLOT_FEED = process.env.ADSENSE_SLOT_FEED || '';
+const ADSENSE_SLOT_BANNER = process.env.ADSENSE_SLOT_BANNER || '';
 // 90 days keeps someone who trains a few times a week permanently signed in without a stolen
 // cookie staying good for a year. Overridable because a family instance and one on the open
 // internet don't want the same number. Only affects cookies minted from now on — the expiry is
@@ -783,6 +798,7 @@ const routes = {
     invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST, allow_register: ALLOW_REGISTER, box_location_mode: BOX_LOCATION_MODE,
     google_analytics_id: GOOGLE_ANALYTICS_ID || null,
     admob_app_id: ADMOB_APP_ID || null, admob_rewarded_unit_id: ADMOB_REWARDED_UNIT_ID || null,
+    adsense_client_id: ADSENSE_CLIENT_ID || null, adsense_slot_feed: ADSENSE_SLOT_FEED || null, adsense_slot_banner: ADSENSE_SLOT_BANNER || null,
   }),
 
   // Public, no auth: admin-authored exercise renames (see the "exercise name overrides"
