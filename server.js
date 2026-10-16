@@ -46,6 +46,12 @@ const BOX_LOCATION_MODE = /^(off|precise)$/i.test(process.env.BOX_LOCATION_MODE 
 // account creation is what this project treats as consent for it, so it's never loaded on the
 // signed-out login screen or for a guest session.
 const GOOGLE_ANALYTICS_ID = process.env.GOOGLE_ANALYTICS_ID || '';
+// Ads plan, phase 1 — same "empty by default, self-hosted instance opts in" posture as
+// GOOGLE_ANALYTICS_ID just above. Only the native app ever shows anything (lib/mobile.js checks
+// MOBILE before touching the AdMob plugin at all) — an instance with these unset just never
+// surfaces the "Earn rewards" card, same as GA never loading gtag.js with no id configured.
+const ADMOB_APP_ID = process.env.ADMOB_APP_ID || '';
+const ADMOB_REWARDED_UNIT_ID = process.env.ADMOB_REWARDED_UNIT_ID || '';
 // 90 days keeps someone who trains a few times a week permanently signed in without a stolen
 // cookie staying good for a year. Overridable because a family instance and one on the open
 // internet don't want the same number. Only affects cookies minted from now on — the expiry is
@@ -649,6 +655,63 @@ async function scanViaNebula(uid, state, importedNewWorkouts) {
     return data.state || state;
   } catch (e) { console.error('scanViaNebula failed:', uid, e.message); return state; }
 }
+// Ads plan, phase 1. Synchronous, same reasoning as scanViaNebula above: a rewarded ad's grant
+// has to actually land before this callback is acknowledged, or Google's own retry (a failed SSV
+// callback gets retried — see their docs) would race a second attempt against an ungranted first
+// one. sourceRewardId is AdMob's reward_amount's sibling param, transaction_id — Nebula dedupes
+// on it, so a retried callback is harmless either way; this is belt-and-suspenders, not the only
+// thing preventing a double-grant.
+async function grantAdRewardViaNebula(uid, sourceRewardId) {
+  try {
+    const r = await fetch(`${NEBULA_URL}/internal/ad-grant`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET },
+      body: JSON.stringify({ uid, sourceRewardId }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return r.ok;
+  } catch (e) { console.error('grantAdRewardViaNebula failed:', uid, e.message); return false; }
+}
+// Google's AdMob Server-Side Verification (SSV) callback — the only trustworthy source that a
+// rewarded ad was genuinely watched; the alternative (the app itself calling an endpoint saying
+// "I watched it, pay me") is trivially scriptable with zero ad ever shown. Google signs
+// (ECDSA P-256 / SHA-256, raw r||s — not ASN.1 DER, hence `dsaEncoding: 'ieee-p1363'` below) the
+// query string up to (not including) the `signature` param itself, against a public key chosen
+// by `key_id` from a small, periodically-rotated set Google publishes at a fixed URL. Fetched
+// once and cached; an unrecognized key_id triggers exactly one forced refetch (Google's own docs
+// say new keys are published ahead of rotation, so a cache miss means "fetch the current set",
+// not "something's broken") rather than refetching on every single callback.
+//
+// NOT independently verified against a real Google callback in this session — there's no way to
+// trigger one without a live AdMob account and a real rewarded ad unit, neither of which exist
+// yet. The signature-verification logic itself was checked against a self-generated EC keypair
+// signing a payload the same way (see the ad-hoc test run alongside this change) — that proves
+// the verification code is internally correct, not that it matches Google's exact wire format
+// down to the byte. Re-check against a real SSV hit (AdMob console has a "send test SSV" button)
+// before relying on this in production.
+const SSV_KEYS_URL = 'https://www.gstatic.com/admob/reward/verifier-keys.json';
+let ssvKeysCache = null;
+async function fetchSsvKeys() {
+  const r = await fetch(SSV_KEYS_URL, { signal: AbortSignal.timeout(5000) });
+  const { keys } = await r.json();
+  return new Map(keys.map(k => [String(k.keyId), k.pem]));
+}
+async function verifySsv(url) {
+  const keyId = url.searchParams.get('key_id');
+  const signature = url.searchParams.get('signature');
+  if (!keyId || !signature) return false;
+  if (!ssvKeysCache) ssvKeysCache = await fetchSsvKeys();
+  let pem = ssvKeysCache.get(keyId);
+  if (!pem) { ssvKeysCache = await fetchSsvKeys(); pem = ssvKeysCache.get(keyId); }
+  if (!pem) return false;
+  const marker = '&signature=';
+  const idx = url.search.indexOf(marker);
+  if (idx < 0) return false;
+  const signedContent = url.search.slice(1, idx);   // leading '?' stripped, everything before &signature=
+  try {
+    return crypto.verify('sha256', Buffer.from(signedContent), { key: pem, dsaEncoding: 'ieee-p1363' }, Buffer.from(signature, 'base64url'));
+  } catch { return false; }
+}
 // Requests FROM Nebula land on the `/internal/*` routes at the bottom of this file — this checks
 // the same shared secret on the way in.
 function requireInternal(req, res) {
@@ -702,7 +765,25 @@ const routes = {
   // Public config the login screen needs before anyone is signed in.
 
 
-  'GET /api/config': async (req, res) => json(res, 200, { invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST, allow_register: ALLOW_REGISTER, box_location_mode: BOX_LOCATION_MODE, google_analytics_id: GOOGLE_ANALYTICS_ID || null }),
+  // Public on purpose — Google's own servers call this directly, with no session of any kind,
+  // which is exactly why everything above (verifySsv) exists: this is the one route in the whole
+  // app whose entire job is to decide, from the request alone, whether to trust it.
+  'GET /api/ads/ssv': async (req, res) => {
+    const url = new URL(req.url, 'http://x');
+    const ok = await verifySsv(url).catch(() => false);
+    if (!ok) return json(res, 403, { error: 'bad signature' });
+    const uid = url.searchParams.get('custom_data') || '';
+    const sourceRewardId = url.searchParams.get('transaction_id') || '';
+    if (!uid || !sourceRewardId) return json(res, 400, { error: 'missing fields' });
+    const granted = await grantAdRewardViaNebula(uid, sourceRewardId);
+    json(res, 200, { ok: granted });
+  },
+
+  'GET /api/config': async (req, res) => json(res, 200, {
+    invite_only: INVITE_ONLY, allow_guest: ALLOW_GUEST, allow_register: ALLOW_REGISTER, box_location_mode: BOX_LOCATION_MODE,
+    google_analytics_id: GOOGLE_ANALYTICS_ID || null,
+    admob_app_id: ADMOB_APP_ID || null, admob_rewarded_unit_id: ADMOB_REWARDED_UNIT_ID || null,
+  }),
 
   // Public, no auth: admin-authored exercise renames (see the "exercise name overrides"
   // section below for how they're written). The catalogue itself lives only in the frontend
