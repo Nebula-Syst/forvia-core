@@ -66,3 +66,45 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=forvia-core
           cache-to: type=gha,mode=max,scope=forvia-core
+
+  # Runs only for a real release (never a plain push to main), and only after the image is
+  # already pushed to GHCR — so there's never a window where this pulls a tag that isn't there
+  # yet. `runs-on: forvia-core-deploy` targets the self-hosted runner in
+  # /home/server/services/forvia-prod/deploy on the production host — nothing here reaches the
+  # server over the network, the job just *is* a process running on it. core-api is one service
+  # of the forvia-prod stack there; Forvia's own deploy handles api/web.
+  deploy:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: [self-hosted, forvia-core-deploy]
+    steps:
+      - name: Ensure docker CLI is on the runner
+        run: command -v docker || (apt-get update && apt-get install -y docker-ce-cli docker-compose-plugin)
+
+      # The runner container's own docker CLI needs its own GHCR login to pull a private
+      # image — a login on the host doesn't carry over, docker credentials live client-side.
+      - uses: docker/login-action@v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull ${{ github.ref_name }} and redeploy
+        working-directory: /home/server/services/forvia-prod
+        run: |
+          # CORE_VERSION pins core-api independently of Forvia's FORVIA_VERSION, so a later
+          # Forvia release keeps whatever version this last set.
+          sed -i "s/^CORE_VERSION=.*/CORE_VERSION=${{ github.ref_name }}/" .env
+          docker compose pull core-api
+          docker compose up -d core-api
+
+      - name: Wait for core-api to report healthy
+        run: |
+          for i in $(seq 1 20); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' forvia-prod-core-api-1 2>/dev/null)
+            echo "status=$status"
+            [ "$status" = "healthy" ] && exit 0
+            sleep 2
+          done
+          echo "::error::forvia-prod-core-api-1 never became healthy after redeploy"
+          exit 1
