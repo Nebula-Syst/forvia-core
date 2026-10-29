@@ -1,0 +1,74 @@
+# The gate dependency updates merge through (see dependabot-automerge.yml): the server's own
+# suite against a real Postgres, then the production image booting until healthy.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Same major as the bundled db service (docker/dev, forvia-prod).
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: forvia
+          POSTGRES_PASSWORD: forvia
+          POSTGRES_DB: forvia
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U forvia" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://forvia:forvia@127.0.0.1:5432/forvia
+    steps:
+      - uses: actions/checkout@v7
+      # node:22-alpine in docker/prod/Dockerfile — CI must match production.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # A base-image bump (node:22-alpine → 24, a new alpine) only shows up here: the image is
+  # built exactly as published and has to boot, migrate an empty database and report healthy.
+  image:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: forvia
+          POSTGRES_PASSWORD: forvia
+          POSTGRES_DB: forvia
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U forvia" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -f docker/prod/Dockerfile -t forvia-core:ci .
+      - name: Boot the image and wait for it to report healthy
+        run: |
+          docker run -d --name core --network host \
+            -e DATABASE_URL=postgres://forvia:forvia@127.0.0.1:5432/forvia \
+            -e INTERNAL_SECRET=ci -e ORIGIN=http://localhost forvia-core:ci
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' core)
+            echo "health=$status"
+            [ "$status" = "healthy" ] && exit 0
+            [ "$(docker inspect -f '{{.State.Running}}' core)" = "true" ] || break
+            sleep 2
+          done
+          docker logs core
+          exit 1
