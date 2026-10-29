@@ -55,7 +55,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./Dockerfile
+          file: ./docker/prod/Dockerfile
           platforms: linux/amd64,linux/arm64
           build-args: |
             VERSION=${{ steps.version_meta.outputs.VERSION }}

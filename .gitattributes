@@ -1,0 +1,4 @@
+# Normalise line endings to LF in the repo and on checkout, so a Windows checkout
+# does not show every file as modified and shell scripts keep running in containers.
+* text=auto eol=lf
+*.sh text eol=lf

@@ -1,3 +1,16 @@
+# syntax=docker/dockerfile:1
+# Production image for forvia-core — ghcr.io/nebula-syst/forvia-core, built and pushed by
+# .github/workflows/docker-publish.yml. Build context is the repo root:
+#
+#   docker build -f docker/prod/Dockerfile .
+
+# Runtime dependencies only, installed exactly as locked (npm ci fails on a stale lockfile
+# instead of silently resolving something else).
+FROM node:22-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
 FROM node:22-alpine
 
 ARG VERSION=dev
@@ -15,15 +28,22 @@ LABEL maintainer="Nebula Systems https://github.com/Nebula-Syst" \
     org.opencontainers.image.revision=$VCS_REF \
     org.opencontainers.image.created=$BUILD_DATE
 
-WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm install --omit=dev && npm cache clean --force
-COPY server.js db.js ./
+# tini: PID 1 that forwards SIGTERM, so `docker stop` doesn't wait out its 10 s timeout.
+# su-exec: drops from root to `node` in the entrypoint once /data is owned by it.
+RUN apk add --no-cache tini su-exec
 
-ENV NODE_ENV=production
-ENV PORT=3000
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json server.js db.js ./
+COPY --chmod=755 docker/prod/entrypoint.sh /usr/local/bin/forvia-entrypoint
+RUN mkdir -p /data && chown node:node /data
+
+ENV NODE_ENV=production \
+    PORT=3000 \
+    DATA_DIR=/data
 
 EXPOSE 3000
+ENTRYPOINT ["/sbin/tini", "--", "forvia-entrypoint"]
 CMD ["node", "server.js"]
 
 HEALTHCHECK --start-period=10s \
