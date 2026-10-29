@@ -10,12 +10,27 @@ Forvia's own level/XP/prestige/streaks, social feed, and coach/box system are **
 they live in Forvia's own repository, which talks to this service over a small internal API
 (`/internal/*`, shared-secret protected, never exposed publicly).
 
+## Local development
+
+Start this repo first — it brings up Postgres and core-api on the shared `forvia` Docker network
+(and creates the shared `forvia-data` volume) that Forvia's own dev stack then joins:
+
+```
+docker/dev/run.sh            # build, start, follow logs (Ctrl+C stops)
+docker/dev/run.sh down       # any docker compose subcommand works
+docker/dev/attach.sh db      # psql
+```
+
+No `.env` needed; copy `.env.example` to change a default. core-api is also reachable directly at
+http://127.0.0.1:3001 for debugging. Production runs every service together from the
+`forvia-prod` repo.
+
 ## Running it
 
 Same shape as Forvia's own backend — no framework, Postgres-backed, one process:
 
 ```
-docker build -t forvia-core .
+docker build -f docker/prod/Dockerfile -t forvia-core .
 docker run -p 3000:3000 \
   -e DATABASE_URL=postgres://forvia:forvia@db:5432/forvia \
   -e ORIGIN=https://app.example.com \

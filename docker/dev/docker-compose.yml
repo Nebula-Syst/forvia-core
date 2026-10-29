@@ -1,0 +1,70 @@
+# Local dev stack for forvia-core: Postgres + core-api, built from this checkout.
+#
+# This is the base of the local Forvia setup — start it first. Every Forvia repo joins the
+# shared `forvia` Docker network and the shared `forvia-data` volume, so services in other
+# repos (Forvia's api/web) reach `db` and `core-api` by name exactly as they would in one
+# compose file. Production brings everything up together from the forvia-prod repo instead.
+#
+#   docker/dev/run.sh            # creates the network if needed, builds, starts, follows logs
+#
+# Paths are relative to this file; .env (optional) lives at the repo root.
+name: forvia-core-dev
+
+services:
+  # PostgreSQL — shared by core-api and Forvia's api (each owns its own tables, see db.js).
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-forvia}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-forvia}
+      - POSTGRES_DB=${POSTGRES_DB:-forvia}
+    ports:
+      # For a local SQL client (DBeaver, pgAdmin...) — 127.0.0.1 only, never the LAN.
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forvia} -d ${POSTGRES_DB:-forvia}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [forvia]
+
+  core-api:
+    image: forvia-core:dev
+    build:
+      context: ../..
+      dockerfile: docker/prod/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: ../../.env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - PORT=${CORE_PORT:-3000}
+      - DATA_DIR=/data
+      - DATABASE_URL=postgres://${POSTGRES_USER:-forvia}:${POSTGRES_PASSWORD:-forvia}@db:5432/${POSTGRES_DB:-forvia}
+      # Forvia's api, on the shared network (only reachable once Forvia's own stack is up).
+      - NEBULA_URL=${NEBULA_URL:-http://api:3000}
+      # Must match the value Forvia's api uses — the same default on both sides.
+      - INTERNAL_SECRET=${INTERNAL_SECRET:-dev-only-insecure-secret-change-me}
+    ports:
+      # Direct access for debugging only; normally reached through Forvia's web container.
+      - "127.0.0.1:${CORE_HOST_PORT:-3001}:${CORE_PORT:-3000}"
+    volumes:
+      - forvia-data:/data    # session secret, VAPID push keys, uploaded photos
+    networks: [forvia]
+
+networks:
+  forvia:
+    name: forvia
+    external: true
+
+volumes:
+  pgdata:
+  # Owned here, mounted (as external) by Forvia's api too.
+  forvia-data:
+    name: forvia-data
