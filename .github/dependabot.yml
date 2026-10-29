@@ -1,0 +1,35 @@
+# Dependency updates. Minor/patch updates merge on their own once Tests is green (see
+# workflows/dependabot-automerge.yml); majors always wait for a human.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      core:
+        patterns: ['*']
+        update-types: ['minor', 'patch']
+
+  # Base image — docker/prod/Dockerfile (node:22-alpine)
+  - package-ecosystem: docker
+    directory: /docker/prod
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 1
+    ignore:
+      # Odd-numbered Node majors are "Current", never LTS.
+      - dependency-name: node
+        versions: ['23.x', '25.x', '27.x', '29.x', '31.x', '33.x']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ['*']
+        update-types: ['minor', 'patch']
